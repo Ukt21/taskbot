@@ -88,8 +88,7 @@ def build_task_buttons(user_id: int, period: str | None):
     kb = InlineKeyboardBuilder()
     for t in tasks:
         kb.button(text=f"✅ {t['title']}", callback_data=f"done:{t['id']}")
-        kb.button(text="❌", callback_data=f"delete:{t['id']}")
-        kb.adjust(2)
+        kb.adjust(1)
 
     return kb.as_markup()
 
