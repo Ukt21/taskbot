@@ -20,7 +20,6 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 from aiogram import Dispatcher
-from handlers.report_ai import router_report  # путь подправь под свою структуру
 
 dp = Dispatcher()
 dp.include_router(router_report)
