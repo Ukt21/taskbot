@@ -192,7 +192,6 @@ async def callback_report(callback: CallbackQuery, state: FSMContext):
 
 
 # -------- Добавление задач: принимаем голос или текст -------- #
-
 @dp.message(AddTaskState.waiting_voice_or_text, F.voice)
 async def handle_add_tasks_voice(message: Message, state: FSMContext):
     data = await state.get_data()
@@ -201,11 +200,11 @@ async def handle_add_tasks_voice(message: Message, state: FSMContext):
     await message.answer("Обрабатываю голосовое сообщение, подожди немного...")
 
     try:
-        transcript = await transcribe_voice_stub(message)
+        transcript = await transcribe_voice(message)
     except Exception as e:
         await message.answer(
-            "Не удалось расшифровать голос. "
-            "Пожалуйста, отправь текстом, что нужно сделать."
+            "Не удалось расшифровать голос.\n"
+            f"Текст ошибки: {e}"
         )
         return
 
