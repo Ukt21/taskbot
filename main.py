@@ -313,9 +313,12 @@ async def _process_report(message: Message, period: str, text: str):
 async def main():
     from aiogram.fsm.storage.memory import MemoryStorage
 
-    dp.storage = MemoryStorage()
-    await dp.start_polling(bot)
+    from aiogram.fsm.storage.memory import MemoryStorage
 
+async def main():
+    dp = Dispatcher(storage=MemoryStorage())
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
