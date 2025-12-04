@@ -19,6 +19,13 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
+from aiogram import Dispatcher
+from handlers.report_ai import router_report  # путь подправь под свою структуру
+
+dp = Dispatcher()
+dp.include_router(router_report)
+# dp.include_router(router_tasks)
+# dp.include_router(router_other)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import get_settings
@@ -97,6 +104,37 @@ async def generate_daily_report(raw_text: str) -> str:
         temperature=0.4,
     )
     return response.choices[0].message.content.strip()
+    from aiogram import Router, F
+from aiogram.types import CallbackQuery, Message
+from aiogram.fsm.context import FSMContext
+
+router = Router()
+
+@router.callback_query(F.data == "daily_report_ai")
+async def start_daily_report(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ReportStates.waiting_for_report_text)
+
+    template = (
+        "Скопируй, заполни цифры и добавь важные моменты дня одним сообщением.\n\n"
+        "Пример:\n\n"
+        "Доброй ночи\n"
+        "01.01.2025 Ташкент\n"
+        "Гостей было: 85\n"
+        "Магазин: 123.450\n"
+        "Городок пробито: 35\n"
+        "Городок записано: 28\n"
+        "Не зашли: 2\n"
+        "Завтрак: 5\n"
+        "Купон: 3\n\n"
+        "Важные моменты:\n"
+        "- было отключение света в Сити Молл;\n"
+        "- один гость пожаловался на прожарку стейка, сделали замену;\n"
+        "- банкет на 20 персон прошёл без замечаний.\n\n"
+        "Отправь свой вариант, а я сделаю из него структурированный отчёт."
+    )
+
+    await callback.message.answer(template)
+    await callback.answer()
 
 # ---------------- КЛАВИАТУРЫ ----------------
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
