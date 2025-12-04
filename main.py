@@ -164,12 +164,11 @@ async def cmd_start(message: Message):
 
 @dp.callback_query(F.data.startswith("add:"))
 async def callback_add_task(callback: CallbackQuery, state: FSMContext):
-    # data вида: add:day / add:week / add:month
     _, period = callback.data.split(":", maxsplit=1)
     await state.set_state(AddTaskState.waiting_voice_or_text)
     await state.update_data(period=period)
 
-    await callback.message.edit_text(
+    await callback.message.answer(
         f"Отправь одно голосовое сообщение или текст с задачами на {period}.\n"
         f"Говори естественно, я сам выделю задачи.",
         reply_markup=main_menu_keyboard(),
@@ -179,12 +178,11 @@ async def callback_add_task(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("report:"))
 async def callback_report(callback: CallbackQuery, state: FSMContext):
-    # data вида: report:auto (или можно будет добавить report:day и т.п.)
     _, period = callback.data.split(":", maxsplit=1)
     await state.set_state(ReportState.waiting_voice_or_text)
     await state.update_data(period=period)
 
-    await callback.message.edit_text(
+    await callback.message.answer(
         "Скажи голосом или напиши текстом, какой отчёт тебе нужен.\n"
         "Например: «покажи, что я сделал за неделю» или "
         "«какие задачи у меня ещё не выполнены на месяц».",
