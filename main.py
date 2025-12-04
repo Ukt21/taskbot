@@ -27,7 +27,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if not BOT_TOKEN:
-    raise RuntimeError("Не задан BOT_TOKEN в переменных окружения")
+    raise RuntimeError()
 if not OPENAI_API_KEY:
     raise RuntimeError("Не задан OPENAI_API_KEY в переменных окружения")
 
