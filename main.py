@@ -33,7 +33,7 @@ if not OPENAI_API_KEY:
     raise RuntimeError("Не задан OPENAI_API_KEY в переменных окружения")
 
 bot = Bot(
-    token=_BOT_TOKEN,
+    token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher(storage=MemoryStorage())
