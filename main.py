@@ -18,21 +18,22 @@ from aiogram.types import (
     Message,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest   # <--- ВАЖНО
 
 from openai import AsyncOpenAI
 
 # ================== НАСТРОЙКИ ==================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not BOT_TOKEN:
-    raise RuntimeError()
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("Не задан TELEGRAM_BOT_TOKEN в переменных окружения")
 if not OPENAI_API_KEY:
     raise RuntimeError("Не задан OPENAI_API_KEY в переменных окружения")
 
 bot = Bot(
-    token=BOT_TOKEN,
+    token=TELEGRAM_BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher(storage=MemoryStorage())
@@ -118,6 +119,7 @@ REPORT_HEADER_TEMPLATE = """Доброй ночи
 class AddTaskState(StatesGroup):
     waiting_for_text = State()
 
+
 class ReportState(StatesGroup):
     waiting_for_points = State()
 
@@ -184,7 +186,6 @@ async def transcribe_voice(message: Message) -> str | None:
             file=byte_io,
             language="ru",
         )
-        # у Whisper ответ в поле text
         text = transcription.text.strip()
         return text or None
     except Exception as e:
@@ -338,11 +339,24 @@ async def cb_task_done(call: CallbackQuery):
     set_task_done(task_id, True)
     rows = list_tasks(call.from_user.id)
     text = "Задача отмечена как выполненная."
-    if rows:
-        await call.message.edit_text(text + "\n\nТекущие задачи:", reply_markup=tasks_kb(rows))
-    else:
-        await call.message.edit_text(text)
-        await call.message.answer("Задач больше нет.", reply_markup=main_menu_kb())
+
+    try:
+        if rows:
+            await call.message.edit_text(
+                text + "\n\nТекущие задачи:", reply_markup=tasks_kb(rows)
+            )
+        else:
+            await call.message.edit_text(text)
+            await call.message.answer(
+                "Задач больше нет.", reply_markup=main_menu_kb()
+            )
+    except TelegramBadRequest as e:
+        # Игнорируем «message is not modified», остальные логируем
+        if "message is not modified" in str(e):
+            logging.debug("Edit ignored: %s", e)
+        else:
+            logging.exception("Ошибка при редактировании сообщения: %s", e)
+
     await call.answer("Готово")
 
 
@@ -357,11 +371,23 @@ async def cb_task_delete(call: CallbackQuery):
     delete_task(task_id)
     rows = list_tasks(call.from_user.id)
     text = "Задача удалена."
-    if rows:
-        await call.message.edit_text(text + "\n\nТекущие задачи:", reply_markup=tasks_kb(rows))
-    else:
-        await call.message.edit_text(text)
-        await call.message.answer("Задач больше нет.", reply_markup=main_menu_kb())
+
+    try:
+        if rows:
+            await call.message.edit_text(
+                text + "\n\nТекущие задачи:", reply_markup=tasks_kb(rows)
+            )
+        else:
+            await call.message.edit_text(text)
+            await call.message.answer(
+                "Задач больше нет.", reply_markup=main_menu_kb()
+            )
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            logging.debug("Edit ignored: %s", e)
+        else:
+            logging.exception("Ошибка при редактировании сообщения: %s", e)
+
     await call.answer("Удалено")
 
 
@@ -430,7 +456,6 @@ async def _finish_report(message: Message, points: str, state: FSMContext):
 
 @dp.callback_query(F.data == "noop")
 async def cb_noop(call: CallbackQuery):
-    # Ничего не делаем, чтобы нажимать на строку задачи без ошибки
     await call.answer()
 
 
@@ -447,3 +472,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     finally:
         db.close()
+
