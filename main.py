@@ -65,7 +65,12 @@ PRIORITY_ICONS = {
 
 
 # ---------------- КЛАВИАТУРЫ ----------------
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+main_menu = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="📊 Отчёт дня с ИИ", callback_data="daily_report_ai")],
+    # здесь твои остальные кнопки
+])
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -142,6 +147,7 @@ def build_task_buttons(user_id: int, period: Optional[str], done: bool = False):
         kb.adjust(2)
 
         return kb.as_markup()
+        
 
 # ---------------- РАСШИФРОВКА ГОЛОСА (WHISPER) ----------------
 
