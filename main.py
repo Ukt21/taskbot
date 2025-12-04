@@ -133,23 +133,45 @@ async def call_task_model(
 
 
 # ----------------- Вспомогательная функция STT (заглушка) ----------------- #
+import tempfile
+from pathlib import Path
 
-async def transcribe_voice_stub(message: Message) -> str:
-    """
-    Здесь ты можешь интегрировать Whisper / свою STT.
-    Пока делаем заглушку: просим пользователя прислать текст,
-    или используем caption/текст, если он есть.
-    """
-    if message.caption:
-        return message.caption
 
-    # В реальном бою:
-    # 1) скачать файл
-    # 2) отправить в OpenAI Whisper или другой STT
-    # 3) вернуть текст
-    #
-    # Здесь — просто бросаем исключение.
-    raise RuntimeError("STT не реализована: нужно подключить расшифровку голоса в backend.")
+async def transcribe_voice(message: Message) -> str:
+    """
+    Скачиваем voice из Telegram, отправляем в OpenAI Whisper
+    и возвращаем текстовую расшифровку.
+    """
+    # Временный файл для voice
+    tmp_dir = tempfile.gettempdir()
+    tmp_path = Path(tmp_dir) / f"voice_{message.chat.id}_{message.message_id}.oga"
+
+    # Скачиваем файл с серверов Telegram
+    await bot.download(message.voice, destination=tmp_path)
+
+    try:
+        with tmp_path.open("rb") as audio_file:
+            # Модель можно оставить whisper-1 или сменить на gpt-4o-mini-transcribe,
+            # если она у тебя доступна.
+            transcription = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="text",  # вернёт просто строку
+                # language="ru",  # можно указать язык явно, но не обязательно
+            )
+    finally:
+        # Чистим временный файл
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # Если response_format="text" — transcription уже строка
+    if isinstance(transcription, str):
+        return transcription
+
+    # На случай если ответ объект с полем text
+    return getattr(transcription, "text", "")
 
 
 # ----------------- Хендлеры ----------------- #
