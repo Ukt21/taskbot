@@ -2,469 +2,449 @@ import asyncio
 import logging
 import os
 import sqlite3
-import io
-from datetime import datetime
+from io import BytesIO
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
     Message,
 )
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
 from openai import AsyncOpenAI
 
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
+# ================== НАСТРОЙКИ ==================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_PATH = os.getenv("DATABASE_PATH", "tasks.db")
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set in environment")
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("Не задан TELEGRAM_BOT_TOKEN в переменных окружения")
 if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is not set in environment")
+    raise RuntimeError("Не задан OPENAI_API_KEY в переменных окружения")
+
+bot = Bot(
+    token=TELEGRAM_BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+dp = Dispatcher(storage=MemoryStorage())
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+# ================== SQLITE ==================
 
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+DB_PATH = "tasks.db"
 
-# ---------------------------------------------------------------------------
-# DB INIT
-# ---------------------------------------------------------------------------
 
 def init_db():
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
-
-    # Таблица задач
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
-            title TEXT NOT NULL,
-            period TEXT NOT NULL,      -- day / week / month
-            is_done INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            text TEXT NOT NULL,
+            scope TEXT NOT NULL,          -- day/week/month
+            done INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
-
-    # Таблица отчётов
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS reports (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            raw_text TEXT NOT NULL,
-            ai_text TEXT NOT NULL
-        )
-        """
-    )
-
     conn.commit()
-    conn.close()
+    return conn
 
 
-def get_db_connection():
-    return sqlite3.connect(DATABASE_PATH)
+db = init_db()
 
 
-# ---------------------------------------------------------------------------
-# FSM STATES
-# ---------------------------------------------------------------------------
-
-class TaskStates(StatesGroup):
-    waiting_for_task_content = State()  # голос/текст новой задачи
-
-
-class ReportStates(StatesGroup):
-    waiting_for_report_text = State()   # черновик отчёта
-
-
-# ---------------------------------------------------------------------------
-# KEYBOARDS
-# ---------------------------------------------------------------------------
-
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    kb = [
-        [
-            InlineKeyboardButton(text="➕ Задача на день", callback_data="add_task:day"),
-        ],
-        [
-            InlineKeyboardButton(text="➕ Задача на неделю", callback_data="add_task:week"),
-        ],
-        [
-            InlineKeyboardButton(text="➕ Задача на месяц", callback_data="add_task:month"),
-        ],
-        [
-            InlineKeyboardButton(text="📋 Мои задачи", callback_data="show_tasks"),
-        ],
-        [
-            InlineKeyboardButton(text="📊 Отчёт дня с ИИ", callback_data="daily_report_ai"),
-        ],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-def task_inline_keyboard(task_id: int) -> InlineKeyboardMarkup:
-    kb = [
-        [
-            InlineKeyboardButton(text="✔️ Готово", callback_data=f"task_done:{task_id}"),
-            InlineKeyboardButton(text="❌ Удалить", callback_data=f"task_delete:{task_id}"),
-        ]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-# ---------------------------------------------------------------------------
-# OPENAI HELPERS
-# ---------------------------------------------------------------------------
-
-async def transcribe_voice(file_bytes: bytes) -> str:
-    """
-    Расшифровка голосового сообщения через Whisper (whisper-1).
-    """
-    bio = io.BytesIO(file_bytes)
-    bio.name = "audio.ogg"  # важно для openai (расширение файла)
-
-    transcription = await openai_client.audio.transcriptions.create(
-        model="whisper-1",
-        file=bio,
-        response_format="text",
-        language="ru",
-    )
-
-    # В новых версиях transcription чаще всего строка
-    if isinstance(transcription, str):
-        return transcription.strip()
-
-    text = getattr(transcription, "text", None)
-    if text:
-        return text.strip()
-
-    return str(transcription).strip()
-
-
-async def generate_daily_report(raw_text: str) -> str:
-    """
-    Генерация структурированного отчёта смены по черновику пользователя.
-    """
-    system_prompt = """
-Ты — менеджер семейного ресторана, который каждый день пишет структурированный вечерний отчёт
-для директора. Стиль деловой, спокойный, без лишних эмоций, но живой и понятный.
-
-Всегда:
-- сохраняй начало отчёта так, как прислал пользователь (обращение «Доброй ночи», дата, город);
-- все цифры (гостей, магазин, городок, завтраки, купоны и т.п.) НЕ меняй, не придумывай новые;
-- ниже сделай связный текстовый отчёт в 1–3 абзацах в том же стиле, как в предыдущих отчётах пользователя:
-  • как прошёл день (спокойно, активно, равномерная посадка и т.д.),
-  • банкетная нагрузка, брони, городок,
-  • какие были жалобы/комментарии гостей и как их решили,
-  • чем закончился день, общая оценка смены.
-
-Используй только информацию из сообщения пользователя.
-Не придумывай события, которых нет в тексте.
-Если гость остался доволен после решения проблемы — подчеркни это.
-"""
-    resp = await openai_client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": raw_text},
-        ],
-        max_tokens=800,
-        temperature=0.4,
-    )
-    return resp.choices[0].message.content.strip()
-
-
-# ---------------------------------------------------------------------------
-# DB HELPERS: TASKS
-# ---------------------------------------------------------------------------
-
-def create_task(user_id: int, title: str, period: str) -> int:
-    now = datetime.now().isoformat(sep=" ", timespec="seconds")
-    conn = get_db_connection()
-    cur = conn.cursor()
+def add_task(user_id: int, text: str, scope: str) -> int:
+    cur = db.cursor()
     cur.execute(
-        """
-        INSERT INTO tasks (user_id, title, period, is_done, created_at, updated_at)
-        VALUES (?, ?, ?, 0, ?, ?)
-        """,
-        (user_id, title, period, now, now),
+        "INSERT INTO tasks (user_id, text, scope, done) VALUES (?, ?, ?, 0)",
+        (user_id, text.strip(), scope),
     )
-    task_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return task_id
+    db.commit()
+    return cur.lastrowid
 
 
-def list_active_tasks(user_id: int):
-    conn = get_db_connection()
-    cur = conn.cursor()
+def list_tasks(user_id: int):
+    cur = db.cursor()
     cur.execute(
-        """
-        SELECT id, title, period
-        FROM tasks
-        WHERE user_id = ? AND is_done = 0
-        ORDER BY created_at DESC
-        """,
+        "SELECT id, text, scope, done FROM tasks WHERE user_id = ? ORDER BY done, id",
         (user_id,),
     )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+    return cur.fetchall()
 
 
-def mark_task_done(task_id: int):
-    now = datetime.now().isoformat(sep=" ", timespec="seconds")
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE tasks SET is_done = 1, updated_at = ? WHERE id = ?",
-        (now, task_id),
-    )
-    conn.commit()
-    conn.close()
+def set_task_done(task_id: int, done: bool):
+    cur = db.cursor()
+    cur.execute("UPDATE tasks SET done = ? WHERE id = ?", (1 if done else 0, task_id))
+    db.commit()
 
 
 def delete_task(task_id: int):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    cur = db.cursor()
     cur.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    conn.commit()
-    conn.close()
+    db.commit()
 
 
-# ---------------------------------------------------------------------------
-# DB HELPERS: REPORTS
-# ---------------------------------------------------------------------------
+# ================== ШАБЛОН ОТЧЁТА ==================
 
-def save_report(user_id: int, raw_text: str, ai_text: str):
-    now = datetime.now().isoformat(sep=" ", timespec="seconds")
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO reports (user_id, created_at, raw_text, ai_text)
-        VALUES (?, ?, ?, ?)
-        """,
-        (user_id, now, raw_text, ai_text),
+REPORT_HEADER_TEMPLATE = """Доброй ночи
+00.00.2025 Ташкент
+Гостей было: 00
+Магазин: 000.000
+Городок пробито: 00
+Городок записано: 00
+Не зашли: 0
+Завтрак: 0
+Купон: 0
+"""
+
+# ================== СОСТОЯНИЯ FSM ==================
+
+
+class AddTaskState(StatesGroup):
+    waiting_for_text = State()
+
+
+class ReportState(StatesGroup):
+    waiting_for_points = State()
+
+
+# ================== КЛАВИАТУРЫ ==================
+
+
+def main_menu_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Задача на день", callback_data="add_task:day")
+    kb.button(text="➕ Задача на неделю", callback_data="add_task:week")
+    kb.button(text="➕ Задача на месяц", callback_data="add_task:month")
+    kb.button(text="📋 Мои задачи", callback_data="list_tasks")
+    kb.button(text="📝 Отчёт с ИИ", callback_data="daily_report")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def tasks_kb(tasks_rows) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for row in tasks_rows:
+        task_id = row["id"]
+        text = row["text"]
+        done = bool(row["done"])
+        status = "✅" if done else "⬜️"
+        caption = (text[:40] + "…") if len(text) > 43 else text
+
+        kb.row(
+            InlineKeyboardButton(
+                text=f"{status} {caption}", callback_data="noop"
+            ),
+        )
+        kb.row(
+            InlineKeyboardButton(
+                text="✔ Выполнено", callback_data=f"task_done:{task_id}"
+            ),
+            InlineKeyboardButton(
+                text="✖ Удалить", callback_data=f"task_delete:{task_id}"
+            ),
+        )
+    kb.row(InlineKeyboardButton(text="⬅ В меню", callback_data="back_to_menu"))
+    return kb.as_markup()
+
+
+# ================== УТИЛИТЫ ==================
+
+
+async def transcribe_voice(message: Message) -> str | None:
+    """
+    Расшифровка voice через Whisper.
+    Возвращает текст или None, если не удалось.
+    """
+    try:
+        voice = message.voice or message.audio
+        if not voice:
+            return None
+
+        file = await bot.get_file(voice.file_id)
+        byte_io: BytesIO = await bot.download_file(file.file_path)
+        byte_io.name = "audio.ogg"  # нужно имя файла для OpenAI SDK
+
+        transcription = await openai_client.audio.transcriptions.create(
+            model="whisper-1",  # модель Whisper
+            file=byte_io,
+            language="ru",
+        )
+        # у Whisper ответ в поле text
+        text = transcription.text.strip()
+        return text or None
+    except Exception as e:
+        logging.exception("Ошибка при расшифровке голоса: %s", e)
+        return None
+
+
+async def generate_report_text(points: str) -> str:
+    """
+    Генерируем тело отчёта (без шапки) через GPT-4o-mini.
+    """
+    system_prompt = (
+        "Ты помощник управляющего рестораном. "
+        "На основе краткого описания дня напиши один профессиональный, "
+        "структурированный отчёт смены. Не пиши приветствия, даты и города – "
+        "сразу переходи к описанию дня, загрузки, банкетов, жалоб и выводов. "
+        "Пиши от первого лица единственного числа."
     )
-    conn.commit()
-    conn.close()
+
+    completion = await openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"Краткое описание дня:\n{points.strip()}",
+            },
+        ],
+        temperature=0.4,
+    )
+    body = completion.choices[0].message.content.strip()
+    return body
 
 
-# ---------------------------------------------------------------------------
-# HANDLERS
-# ---------------------------------------------------------------------------
+# ================== ХЕНДЛЕРЫ ==================
+
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     text = (
-        "Привет! Это бот задач и отчётов.\n\n"
-        "Я умею:\n"
-        "• принимать задачи голосом или текстом (день / неделя / месяц);\n"
-        "• показывать список активных задач с галочками и удалением;\n"
-        "• собирать вечерний отчёт дня с помощью ИИ по твоему черновику.\n\n"
-        "Выбери действие ниже:"
+        "Привет, это бот задач и отчётов.\n\n"
+        "Ты можешь:\n"
+        "• добавлять задачи на день, неделю и месяц (в том числе голосом);\n"
+        "• отмечать задачи выполненными;\n"
+        "• формировать отчёт смены с помощью ИИ.\n\n"
+        "Выбери действие:"
     )
-    await message.answer(text, reply_markup=main_menu_keyboard())
+    await message.answer(text, reply_markup=main_menu_kb())
 
 
-# --- ЗАДАЧИ: старт добавления ------------------------------------------------
+@dp.message(Command("menu"))
+async def cmd_menu(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Главное меню:", reply_markup=main_menu_kb())
+
+
+# ---------- Добавление задач ----------
+
 
 @dp.callback_query(F.data.startswith("add_task:"))
-async def cb_add_task(callback: CallbackQuery, state: FSMContext):
-    period = callback.data.split(":", maxsplit=1)[1]  # day/week/month
-    await state.update_data(period=period)
-    await state.set_state(TaskStates.waiting_for_task_content)
+async def cb_add_task(call: CallbackQuery, state: FSMContext):
+    scope = call.data.split(":", maxsplit=1)[1]  # day/week/month
+    await state.set_state(AddTaskState.waiting_for_text)
+    await state.update_data(scope=scope)
+    scope_label = {
+        "day": "день",
+        "week": "неделю",
+        "month": "месяц",
+    }.get(scope, "день")
 
-    period_label = {
-        "day": "на сегодня",
-        "week": "на эту неделю",
-        "month": "на этот месяц",
-    }.get(period, "")
-
-    text = (
-        f"Отправь голосовое или текст с задачей {period_label}.\n\n"
-        "Пример голосом: «Сделать инвентарь текстиля»,\n"
-        "Пример текстом: «Перепроверить городок перед закрытием»."
+    await call.message.answer(
+        f"Продиктуй или напиши текст задачи на <b>{scope_label}</b>.\n"
+        "Можно отправить голосовое сообщение.",
     )
-    await callback.message.answer(text)
-    await callback.answer()
+    await call.answer()
 
 
-# --- ЗАДАЧИ: приём текста/голоса ---------------------------------------------
-
-@dp.message(TaskStates.waiting_for_task_content)
-async def handle_new_task(message: Message, state: FSMContext):
+@dp.message(AddTaskState.waiting_for_text, F.voice)
+async def add_task_from_voice(message: Message, state: FSMContext):
     data = await state.get_data()
-    period = data.get("period", "day")
+    scope = data.get("scope", "day")
 
-    task_text: str | None = None
-
-    if message.voice:
-        await message.answer("Расшифровываю голос через Whisper…")
-        voice_bytes_io = await bot.download(message.voice.file_id)
-        voice_bytes = voice_bytes_io.read()
-        try:
-            task_text = await transcribe_voice(voice_bytes)
-        except Exception as e:
-            logging.exception("Ошибка транскрипции: %s", e)
-            await message.answer("Не удалось расшифровать голос. Отправь, пожалуйста, текстом.")
-            return
-    elif message.text:
-        task_text = message.text.strip()
-
-    if not task_text:
-        await message.answer("Не вижу текста задачи. Отправь голосовое или текст ещё раз.")
+    text = await transcribe_voice(message)
+    if not text:
+        await message.answer(
+            "Не удалось расшифровать голос. Пожалуйста, отправь текстом задачу."
+        )
         return
 
-    task_id = create_task(message.from_user.id, task_text, period)
-
+    task_id = add_task(message.from_user.id, text, scope)
+    await message.answer(
+        f"Задача добавлена (ID {task_id}):\n• {text}",
+        reply_markup=main_menu_kb(),
+    )
     await state.clear()
 
-    emoji = {"day": "📆", "week": "🗓", "month": "📅"}.get(period, "📝")
-    await message.answer(
-        f"{emoji} Задача сохранена:\n\n{task_text}",
-        reply_markup=task_inline_keyboard(task_id),
-    )
 
-
-# --- ЗАДАЧИ: показать список --------------------------------------------------
-
-@dp.callback_query(F.data == "show_tasks")
-async def cb_show_tasks(callback: CallbackQuery):
-    rows = list_active_tasks(callback.from_user.id)
-    if not rows:
-        await callback.message.answer("У тебя пока нет активных задач.")
-        await callback.answer()
+@dp.message(AddTaskState.waiting_for_text, F.text)
+async def add_task_from_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    scope = data.get("scope", "day")
+    text = message.text.strip()
+    if not text:
+        await message.answer("Пустая задача, отправь нормальный текст.")
         return
 
-    for task_id, title, period in rows:
-        emoji = {"day": "📆", "week": "🗓", "month": "📅"}.get(period, "📝")
-        text = f"{emoji} {title}"
-        await callback.message.answer(text, reply_markup=task_inline_keyboard(task_id))
+    task_id = add_task(message.from_user.id, text, scope)
+    await message.answer(
+        f"Задача добавлена (ID {task_id}):\n• {text}",
+        reply_markup=main_menu_kb(),
+    )
+    await state.clear()
 
-    await callback.answer()
+
+# ---------- Список задач ----------
 
 
-# --- ЗАДАЧИ: обработка галочки/удаления --------------------------------------
+@dp.callback_query(F.data == "list_tasks")
+async def cb_list_tasks(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    rows = list_tasks(call.from_user.id)
+    if not rows:
+        await call.message.answer(
+            "У тебя пока нет задач.", reply_markup=main_menu_kb()
+        )
+        await call.answer()
+        return
+
+    await call.message.answer(
+        "Текущие задачи:", reply_markup=tasks_kb(rows)
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data == "back_to_menu")
+async def cb_back_to_menu(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.answer("Главное меню:", reply_markup=main_menu_kb())
+    await call.answer()
+
 
 @dp.callback_query(F.data.startswith("task_done:"))
-async def cb_task_done(callback: CallbackQuery):
+async def cb_task_done(call: CallbackQuery):
     try:
-        task_id = int(callback.data.split(":", maxsplit=1)[1])
+        task_id = int(call.data.split(":", maxsplit=1)[1])
     except ValueError:
-        await callback.answer("Ошибка ID задачи.", show_alert=True)
+        await call.answer("Ошибка ID задачи", show_alert=True)
         return
 
-    mark_task_done(task_id)
-    await callback.answer("Задача отмечена выполненной ✅")
-
-    try:
-        old_text = callback.message.text or ""
-        if "✅" not in old_text:
-            new_text = old_text + " ✅"
-            await callback.message.edit_text(new_text)
-    except Exception:
-        pass
+    set_task_done(task_id, True)
+    rows = list_tasks(call.from_user.id)
+    text = "Задача отмечена как выполненная."
+    if rows:
+        await call.message.edit_text(text + "\n\nТекущие задачи:", reply_markup=tasks_kb(rows))
+    else:
+        await call.message.edit_text(text)
+        await call.message.answer("Задач больше нет.", reply_markup=main_menu_kb())
+    await call.answer("Готово")
 
 
 @dp.callback_query(F.data.startswith("task_delete:"))
-async def cb_task_delete(callback: CallbackQuery):
+async def cb_task_delete(call: CallbackQuery):
     try:
-        task_id = int(callback.data.split(":", maxsplit=1)[1])
+        task_id = int(call.data.split(":", maxsplit=1)[1])
     except ValueError:
-        await callback.answer("Ошибка ID задачи.", show_alert=True)
+        await call.answer("Ошибка ID задачи", show_alert=True)
         return
 
     delete_task(task_id)
-    await callback.answer("Задача удалена ❌")
+    rows = list_tasks(call.from_user.id)
+    text = "Задача удалена."
+    if rows:
+        await call.message.edit_text(text + "\n\nТекущие задачи:", reply_markup=tasks_kb(rows))
+    else:
+        await call.message.edit_text(text)
+        await call.message.answer("Задач больше нет.", reply_markup=main_menu_kb())
+    await call.answer("Удалено")
 
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
+
+# ---------- Отчёт с ИИ ----------
 
 
-# ---------------------------------------------------------------------------
-# ОТЧЁТ ДНЯ С ИИ
-# ---------------------------------------------------------------------------
+@dp.callback_query(F.data == "daily_report")
+async def cb_daily_report(call: CallbackQuery, state: FSMContext):
+    await state.set_state(ReportState.waiting_for_points)
 
-@dp.callback_query(F.data == "daily_report_ai")
-async def cb_daily_report_start(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(ReportStates.waiting_for_report_text)
-
-    template = (
-        "Отправь черновик отчёта одним сообщением в таком формате:\n\n"
-        "Доброй ночи\n"
-        "00.00.2025 Ташкент\n"
-        "Гостей было: 00\n"
-        "Магазин: 000.000\n"
-        "Городок пробито: 00\n"
-        "Городок записано: 00\n"
-        "Не зашли: 0\n"
-        "Завтрак: 0\n"
-        "Купон: 0\n\n"
+    header_text = (
+        f"{REPORT_HEADER_TEMPLATE}\n"
         "Важные моменты:\n"
-        "- коротко пунктами опиши, что было важного за день\n"
+        "- коротко пунктами опиши, что было важного за день;\n"
         "- замечания гостей, отключения света, банкеты и т.п.\n\n"
-        "Я соберу из этого профессиональный отчёт, как ты писал раньше."
+        "Отправь голосом или текстом важные моменты дня, "
+        "я соберу из этого профессиональный отчёт."
     )
 
-    await callback.message.answer(template)
-    await callback.answer()
+    await call.message.answer(header_text)
+    await call.answer()
 
 
-@dp.message(ReportStates.waiting_for_report_text)
-async def handle_daily_report(message: Message, state: FSMContext):
-    raw_text = message.text
-    if not raw_text:
-        await message.answer("Отправь, пожалуйста, отчёт текстом одним сообщением.")
+@dp.message(ReportState.waiting_for_points, F.voice)
+async def report_points_voice(message: Message, state: FSMContext):
+    points = await transcribe_voice(message)
+    if not points:
+        await message.answer(
+            "Не удалось расшифровать голос. Пожалуйста, отправь важные моменты текстом."
+        )
         return
 
-    await message.answer("Формирую отчёт с ИИ…")
+    await _finish_report(message, points, state)
 
+
+@dp.message(ReportState.waiting_for_points, F.text)
+async def report_points_text(message: Message, state: FSMContext):
+    points = message.text.strip()
+    if not points:
+        await message.answer("Опиши, пожалуйста, как прошёл день.")
+        return
+
+    await _finish_report(message, points, state)
+
+
+async def _finish_report(message: Message, points: str, state: FSMContext):
+    await message.answer("Формирую отчёт с ИИ…")
     try:
-        ai_text = await generate_daily_report(raw_text)
+        body = await generate_report_text(points)
+        final_report = f"{REPORT_HEADER_TEMPLATE}\n{body}"
+
+        await message.answer(
+            f"<b>Готовый отчёт дня:</b>\n\n{final_report}"
+        )
     except Exception as e:
         logging.exception("Ошибка генерации отчёта: %s", e)
-        await message.answer("Не получилось сформировать отчёт, попробуй ещё раз чуть позже.")
-        return
-
-    await state.clear()
-
-    save_report(message.from_user.id, raw_text, ai_text)
-
-    await message.answer("Готовый отчёт дня:\n\n" + ai_text)
+        await message.answer(
+            "Не получилось сформировать отчёт. Попробуй ещё раз чуть позже."
+        )
+    finally:
+        await state.clear()
 
 
-# ---------------------------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------------------------
+# ---------- NOOP для строк задач ----------
+
+
+@dp.callback_query(F.data == "noop")
+async def cb_noop(call: CallbackQuery):
+    # Ничего не делаем, чтобы нажимать на строку задачи без ошибки
+    await call.answer()
+
+
+# ================== ЗАПУСК ==================
+
 
 async def main():
-    init_db()
-    logging.info("Бот задач и отчётов запущен.")
+    logging.info("Бот запущен")
     await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
+    try:
+        asyncio.run(main())
+    finally:
+        db.close()
