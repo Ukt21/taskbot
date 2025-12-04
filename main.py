@@ -29,6 +29,9 @@ bot = Bot(token=settings.bot_token)
 
 client = OpenAI(api_key=settings.openai_api_key)
 
+CHAT_MODEL = settings.openai_model          # gpt-4o-mini
+STT_MODEL = "gpt-4o-mini-transcribe"        # модель для расшифровки голоса
+
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 # ----------------- FSM-состояния ----------------- #
