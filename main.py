@@ -123,26 +123,32 @@ async def transcribe_voice(message: Message) -> str:
 
     tmp_path = Path(tempfile.gettempdir()) / f"voice_{message.chat.id}_{message.message_id}.oga"
 
-    # Скачиваем файл
-    await bot.download(message.voice, destination=tmp_path)
+    # 1. Скачиваем voice с сервера Telegram
+    try:
+        # В aiogram 3 можно передавать сам объект message.voice
+        await bot.download(message.voice, destination=tmp_path)
+    except Exception as e:
+        logging.exception("Ошибка при скачивании голосового из Telegram")
+        raise RuntimeError(f"Ошибка скачивания файла из Telegram: {e}")
 
+    # 2. Отправляем файл в OpenAI
     try:
         with tmp_path.open("rb") as audio_file:
             result = client.audio.transcriptions.create(
-                model=STT_MODEL,
+                model=STT_MODEL,        # gpt-4o-mini-transcribe
                 file=audio_file,
-                response_format="text",
+                response_format="text", # вернёт обычную строку
             )
-    except Exception:
+    except Exception as e:
         logging.exception("Ошибка при расшифровке голоса (STT)")
-        # пробрасываем дальше, чтобы хендлер показал сообщение пользователю
-        raise
+        raise RuntimeError(f"Ошибка STT (gpt-4o-mini-transcribe): {e}")
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
         except Exception:
             logging.exception("Не удалось удалить временный файл голосового")
 
+    # result уже строка
     return result
 
 # ----------------- Хендлеры ----------------- #
