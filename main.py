@@ -22,6 +22,7 @@ from prompts import TASK_ASSISTANT_SYSTEM_PROMPT
 
 settings = get_settings()
 bot = Bot(token=settings.bot_token)
+client = OpenAI(api_key=settings.openai_api_key)
 
 # Один общий storage и один общий dispatcher
 storage = MemoryStorage()
