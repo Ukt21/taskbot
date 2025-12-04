@@ -27,7 +27,7 @@ from openai import AsyncOpenAI
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not TELEGRAM_BOT_TOKEN:
+if not BOT_TOKEN:
     raise RuntimeError()
 if not OPENAI_API_KEY:
     raise RuntimeError("Не задан OPENAI_API_KEY в переменных окружения")
