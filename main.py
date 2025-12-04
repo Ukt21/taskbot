@@ -310,15 +310,20 @@ async def _process_report(message: Message, period: str, text: str):
 
 # ----------------- Точка входа ----------------- #
 
+# ----------------- Точка входа ----------------- #
+
 async def main():
     from aiogram.fsm.storage.memory import MemoryStorage
 
-    from aiogram.fsm.storage.memory import MemoryStorage
+    storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
 
-async def main():
-    dp = Dispatcher(storage=MemoryStorage())
+    # Регистрируем хендлеры после создания Dispatcher
+    dp.include_router(dp)   # если нужно объединять — убери
+    # но в нашем случае dp уже содержит handlers → эту строку НЕ вставляй
+
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
-
