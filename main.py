@@ -139,10 +139,7 @@ def build_task_buttons(user_id: int, period: Optional[str], done: bool = False):
         # Строка: [✅ ...] [✏️] [❌]
         kb.button(text=f"✅ {title}", callback_data=f"done:{t['id']}")
         kb.button(text="✏️", callback_data=f"edit:{t['id']}")
-        kb.button(text="❌", callback_data=f"delete:{t['id']}")
-        kb.adjust(3)
-
-    return kb.as_markup()
+        kb.adjust(2)
 
 async def show_tasks(message, tasks):
     if not tasks:
