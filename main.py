@@ -162,6 +162,7 @@ async def show_tasks(message, tasks):
         )
 
         await message.answer(text, reply_markup=keyboard)
+        return kb.as_markup()
 
 # ---------------- РАСШИФРОВКА ГОЛОСА (WHISPER) ----------------
 
