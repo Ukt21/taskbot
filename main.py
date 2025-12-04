@@ -118,7 +118,6 @@ REPORT_HEADER_TEMPLATE = """Доброй ночи
 class AddTaskState(StatesGroup):
     waiting_for_text = State()
 
-
 class ReportState(StatesGroup):
     waiting_for_points = State()
 
