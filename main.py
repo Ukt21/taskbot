@@ -1,50 +1,48 @@
-import logging
-
-logging.basicConfig(level=logging.INFO)
-
 import asyncio
 import json
-from typing import Literal, Dict, Any
-from openai import OpenAI
+import tempfile
+from pathlib import Path
+from typing import Dict, Any
 
 import httpx
+from openai import OpenAI
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.storage.memory import MemoryStorage  # ВАЖНО
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import get_settings
 from prompts import TASK_ASSISTANT_SYSTEM_PROMPT
-from openai import OpenAI
+from db import init_db, add_task, get_tasks, set_task_done, delete_task
+
+
+# ---------------- ИНИЦИАЛИЗАЦИЯ ----------------
 
 settings = get_settings()
 bot = Bot(token=settings.bot_token)
-
 client = OpenAI(api_key=settings.openai_api_key)
-
-CHAT_MODEL = settings.openai_model          # gpt-4o-mini
-STT_MODEL = "whisper-1"                     # модель для расшифровки голоса
 
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-# ----------------- FSM-состояния ----------------- #
 
-class AddTaskState(StatesGroup):
-    waiting_voice_or_text = State()
+PERIOD_LABELS_RU = {
+    "day": "день",
+    "week": "неделю",
+    "month": "месяц",
+    "auto": "период",
+}
 
 
-class ReportState(StatesGroup):
-    waiting_voice_or_text = State()
-
-
-# ----------------- Клавиатура ----------------- #
+# ---------------- КЛАВИАТУРА ----------------
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -77,102 +75,127 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-# ----------------- Вызов OpenAI ----------------- #
-async def call_task_model(
-    *,
-    button: Literal["add", "report"],
-    period: Literal["day", "week", "month", "auto"],
-    text: str,
-) -> Dict[str, Any]:
-    user_payload = {
+def build_task_buttons(user_id: int, period: str | None):
+    """
+    Строим клавиатуру задач для пользователя и периода.
+    Если period = None, берём все активные задачи.
+    """
+    tasks = get_tasks(user_id, period=period, only_active=True)
+
+    if not tasks:
+        return None
+
+    kb = InlineKeyboardBuilder()
+    for t in tasks:
+        kb.button(text=f"✅ {t['title']}", callback_data=f"done:{t['id']}")
+        kb.button(text="❌", callback_data=f"delete:{t['id']}")
+        kb.adjust(2)
+
+    return kb.as_markup()
+
+
+# ---------------- РАСШИФРОВКА ГОЛОСА (WHISPER) ----------------
+
+async def transcribe_voice(message: Message) -> str:
+    """
+    Скачиваем voice из Telegram и отправляем в OpenAI Whisper (whisper-1).
+    Возвращаем чистый текст.
+    """
+    tmp_path = Path(tempfile.gettempdir()) / f"voice_{message.message_id}.oga"
+
+    # скачиваем файл с серверов Telegram
+    tg_file = await bot.get_file(message.voice.file_id)
+    await bot.download_file(tg_file.file_path, tmp_path)
+
+    try:
+        with tmp_path.open("rb") as audio:
+            result = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio,
+                response_format="text",  # вернёт просто строку
+                # language="ru",  # можно раскомментировать, чтобы фиксировать язык
+            )
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    return result  # response_format="text" → result уже строка
+
+
+# ---------------- ВЫЗОВ ИИ ДЛЯ РАЗБОРА ЗАДАЧ ----------------
+
+async def call_task_model(button: str, period: str, text: str) -> Dict[str, Any]:
+    """
+    Вызывает модель чата по твоему системному промту.
+    Возвращает JSON (dict) с полями mode/add/report.
+    """
+    payload = {
         "button": button,
         "period": period,
         "text": text,
     }
 
-    try:
-        response = client.chat.completions.create(
-            model=CHAT_MODEL,
-            messages=[
-                {"role": "system", "content": TASK_ASSISTANT_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
-            ],
-            response_format={"type": "json_object"},
+    messages = [
+        {"role": "system", "content": TASK_ASSISTANT_SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+
+    async with httpx.AsyncClient(timeout=60.0) as client_http:
+        r = await client_http.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.openai_model,  # напр. gpt-4.1-mini
+                "messages": messages,
+                "response_format": {"type": "json_object"},
+            },
         )
-    except Exception:
-        logging.exception("Ошибка при обращении к чат-модели OpenAI")
-        raise
+        r.raise_for_status()
+        data = r.json()
 
-    content = response.choices[0].message.content
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        logging.exception("Модель вернула невалидный JSON")
-        raise
-
-    return parsed
+    content = data["choices"][0]["message"]["content"]
+    return json.loads(content)
 
 
+# ---------------- СОСТОЯНИЯ FSM ----------------
 
-# ----------------- Вспомогательная функция STT (заглушка) ----------------- #
-import tempfile
-from pathlib import Path
+class AddTaskState(StatesGroup):
+    waiting_voice_or_text = State()
 
-async def transcribe_voice(message: Message) -> str:
-    """
-    Скачивает голосовое сообщение из Telegram и расшифровывает его
-    через модель whisper-1 (поддерживает ogg/oga от Telegram).
-    """
 
-    tmp_path = Path(tempfile.gettempdir()) / f"voice_{message.chat.id}_{message.message_id}.oga"
+class ReportState(StatesGroup):
+    waiting_voice_or_text = State()
 
-    # 1. Скачиваем voice с сервера Telegram
-    try:
-        await bot.download(message.voice, destination=tmp_path)
-    except Exception as e:
-        logging.exception("Ошибка при скачивании голосового из Telegram")
-        raise RuntimeError(f"Ошибка скачивания файла из Telegram: {e}")
 
-    # 2. Отправляем файл в OpenAI (whisper-1)
-    try:
-        with tmp_path.open("rb") as audio_file:
-            result = client.audio.transcriptions.create(
-                model=STT_MODEL,          # whisper-1
-                file=audio_file,
-                response_format="text",   # вернёт строку
-                # language="ru",          # можно явно указать язык, не обязательно
-            )
-    except Exception as e:
-        logging.exception("Ошибка при расшифровке голоса (STT)")
-        raise RuntimeError(f"Ошибка STT (whisper-1): {e}")
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            logging.exception("Не удалось удалить временный файл голосового")
-
-    # result уже строка
-    return result
-
-# ----------------- Хендлеры ----------------- #
+# ---------------- ХЕНДЛЕРЫ /start И МЕНЮ ----------------
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     await message.answer(
-        "Привет! Это бот для управления задачами по голосу.\n"
-        "Выбери нужное действие на инлайн-клавиатуре ниже:",
+        "Привет! Я бот для управления задачами по голосу.\n"
+        "Выбери нужное действие:",
         reply_markup=main_menu_keyboard(),
     )
 
 
 @dp.callback_query(F.data.startswith("add:"))
-async def callback_add_task(callback: CallbackQuery, state: FSMContext):
+async def callback_add(callback: CallbackQuery, state: FSMContext):
+    """
+    Нажатие на «Добавить задачу на день/неделю/месяц».
+    """
     _, period = callback.data.split(":", maxsplit=1)
+    ru = PERIOD_LABELS_RU.get(period, period)
+
     await state.set_state(AddTaskState.waiting_voice_or_text)
     await state.update_data(period=period)
 
     await callback.message.answer(
-        f"Отправь одно голосовое сообщение или текст с задачами на {period}.\n"
+        f"Отправь голосовое или текст с задачами на {ru}.\n"
         f"Говори естественно, я сам выделю задачи.",
         reply_markup=main_menu_keyboard(),
     )
@@ -181,7 +204,11 @@ async def callback_add_task(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("report:"))
 async def callback_report(callback: CallbackQuery, state: FSMContext):
+    """
+    Нажатие на «Отчёт по задачам».
+    """
     _, period = callback.data.split(":", maxsplit=1)
+
     await state.set_state(ReportState.waiting_voice_or_text)
     await state.update_data(period=period)
 
@@ -194,126 +221,151 @@ async def callback_report(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# -------- Добавление задач: принимаем голос или текст -------- #
-@dp.message(AddTaskState.waiting_voice_or_text, F.voice)
-async def handle_add_tasks_voice(message: Message, state: FSMContext):
-    data = await state.get_data()
-    period = data.get("period", "day")
+# ---------------- ДОБАВЛЕНИЕ ЗАДАЧ ----------------
 
-    await message.answer("Обрабатываю голосовое сообщение, подожди немного...")
+@dp.message(AddTaskState.waiting_voice_or_text, F.voice)
+async def add_task_voice(message: Message, state: FSMContext):
+    data = await state.get_data()
+    period = data["period"]
+
+    await message.answer("Обрабатываю голосовое, подожди немного...")
 
     try:
-        transcript = await transcribe_voice(message)
+        text = await transcribe_voice(message)
     except Exception as e:
-        await message.answer(
-            "Не удалось расшифровать голос.\n"
-            f"Текст ошибки: {e}"
-        )
+        await message.answer(f"Ошибка STT: {e}")
         return
 
-    await _process_add_tasks(message, period=period, text=transcript)
+    await _process_add_tasks(message, period, text)
     await state.clear()
 
 
 @dp.message(AddTaskState.waiting_voice_or_text, F.text)
-async def handle_add_tasks_text(message: Message, state: FSMContext):
+async def add_task_text(message: Message, state: FSMContext):
     data = await state.get_data()
-    period = data.get("period", "day")
+    period = data["period"]
 
-    transcript = message.text
-    await _process_add_tasks(message, period=period, text=transcript)
+    await _process_add_tasks(message, period, message.text)
     await state.clear()
 
 
 async def _process_add_tasks(message: Message, period: str, text: str):
+    """
+    Вызываем ИИ, сохраняем задачи в SQLite и показываем инлайн-кнопки.
+    """
     try:
-        result = await call_task_model(
-            button="add",
-            period=period,  # day | week | month
-            text=text,
-        )
+        result = await call_task_model("add", period, text)
     except Exception as e:
-        await message.answer(f"Ошибка при обращении к ИИ: {e}")
+        await message.answer(f"Ошибка ИИ: {e}")
         return
 
-    # На этом этапе result — это уже JSON вида:
-    # {
-    #   "mode": "add",
-    #   "period": "...",
-    #   "tasks": [...]
-    # }
-    # Здесь ты можешь сохранить задачи в БД.
-    # Пока просто показываем JSON пользователю.
-    pretty = json.dumps(result, ensure_ascii=False, indent=2)
-    await message.answer(
-        "Я выделил такие задачи (JSON):\n"
-        f"<pre>{pretty}</pre>",
-        parse_mode="HTML",
-    )
+    user_id = message.from_user.id
+    tasks_list = result.get("tasks", [])
+
+    for item in tasks_list:
+        title = item.get("title", "").strip()
+        if not title:
+            continue
+        add_task(user_id, title, period)
+
+    kb = build_task_buttons(user_id, period)
+    if kb:
+        await message.answer(
+            f"Задач добавлено: {len(tasks_list)}",
+            reply_markup=kb,
+        )
+    else:
+        await message.answer("Не удалось выделить задачи из текста.")
 
 
-# -------- Отчёт по задачам: принимаем голос или текст -------- #
+# ---------------- ОТЧЁТ ПО ЗАДАЧАМ ----------------
 
 @dp.message(ReportState.waiting_voice_or_text, F.voice)
-async def handle_report_voice(message: Message, state: FSMContext):
+async def report_voice(message: Message, state: FSMContext):
     data = await state.get_data()
-    period = data.get("period", "auto")
+    period = data["period"]
 
-    await message.answer("Обрабатываю голосовое сообщение, подожди немного...")
+    await message.answer("Обрабатываю голосовое, подожди немного...")
 
     try:
-        transcript = await transcribe_voice(message)
+        text = await transcribe_voice(message)
     except Exception as e:
-        await message.answer(
-            "Не удалось расшифровать голос.\n"
-            f"Текст ошибки: {e}"
-        )
+        await message.answer(f"Ошибка STT: {e}")
         return
 
-    await _process_report(message, period=period, text=transcript)
+    await _process_report(message, period, text)
     await state.clear()
 
 
 @dp.message(ReportState.waiting_voice_or_text, F.text)
-async def handle_report_text(message: Message, state: FSMContext):
+async def report_text(message: Message, state: FSMContext):
     data = await state.get_data()
-    period = data.get("period", "auto")
+    period = data["period"]
 
-    transcript = message.text
-    await _process_report(message, period=period, text=transcript)
+    await _process_report(message, period, message.text)
     await state.clear()
 
 
 async def _process_report(message: Message, period: str, text: str):
-    try:
-        result = await call_task_model(
-            button="report",
-            period=period,  # day | week | month | auto
-            text=text,
-        )
-    except Exception as e:
-        await message.answer(f"Ошибка при обращении к ИИ: {e}")
+    """
+    Вызываем ИИ (если нужно), но пока для простоты используем period из FSM.
+    Показываем активные задачи пользователя.
+    """
+    user_id = message.from_user.id
+    # period == "auto" → показываем все периоды
+    tasks = get_tasks(user_id, None if period == "auto" else period, only_active=True)
+
+    if not tasks:
+        await message.answer("У тебя пока нет активных задач.")
         return
 
-    # result:
-    # {
-    #   "mode": "report",
-    #   "period": "...",
-    #   "status_filter": "done | not_done | all"
-    # }
-    # Здесь ты можешь дернуть свою БД и реально отдать отчёт.
-    # Пока просто возвращаем JSON для отладки.
-    pretty = json.dumps(result, ensure_ascii=False, indent=2)
-    await message.answer(
-        "Параметры отчёта (JSON):\n"
-        f"<pre>{pretty}</pre>",
-        parse_mode="HTML",
-    )
+    # Берём период первой задачи (если в отчёте auto)
+    real_period = tasks[0]["period"] if period == "auto" else period
+    kb = build_task_buttons(user_id, real_period)
+
+    await message.answer("Текущие задачи:", reply_markup=kb)
 
 
-# ----------------- Точка входа ----------------- #
+# ---------------- ОБРАБОТКА КНОПОК ✅ / ❌ ----------------
+
+@dp.callback_query(F.data.startswith("done:"))
+async def cb_done(callback: CallbackQuery):
+    task_id = int(callback.data.split(":", maxsplit=1)[1])
+    set_task_done(task_id)
+    await callback.answer("Задача отмечена как выполненная ✅")
+    await refresh_after_change(callback)
+
+
+@dp.callback_query(F.data.startswith("delete:"))
+async def cb_delete(callback: CallbackQuery):
+    task_id = int(callback.data.split(":", maxsplit=1)[1])
+    delete_task(task_id)
+    await callback.answer("Задача удалена ❌")
+    await refresh_after_change(callback)
+
+
+async def refresh_after_change(callback: CallbackQuery):
+    """
+    После изменения задач перестраиваем клавиатуру.
+    Если задач не осталось — редактируем текст.
+    """
+    user_id = callback.from_user.id
+    tasks = get_tasks(user_id, None, only_active=True)
+
+    if not tasks:
+        await callback.message.edit_text("🎉 Все задачи выполнены!", reply_markup=None)
+        return
+
+    # Берём период первой задачи
+    period = tasks[0]["period"]
+    kb = build_task_buttons(user_id, period)
+    await callback.message.edit_reply_markup(reply_markup=kb)
+
+
+# ---------------- MAIN ----------------
 
 async def main():
+    init_db()
     await dp.start_polling(bot)
 
 
