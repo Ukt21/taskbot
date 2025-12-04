@@ -139,40 +139,30 @@ from pathlib import Path
 
 async def transcribe_voice(message: Message) -> str:
     """
-    Скачиваем voice из Telegram, отправляем в OpenAI Whisper
-    и возвращаем текстовую расшифровку.
+    Расшифровка голосового через модель gpt-4o-mini-transcribe.
     """
-    # Временный файл для voice
-    tmp_dir = tempfile.gettempdir()
-    tmp_path = Path(tmp_dir) / f"voice_{message.chat.id}_{message.message_id}.oga"
 
-    # Скачиваем файл с серверов Telegram
-    await bot.download(message.voice, destination=tmp_path)
+    # временный путь для файла
+    tmp_path = Path(tempfile.gettempdir()) / f"voice_{message.chat.id}_{message.message_id}.oga"
+
+    # скачиваем voice из Telegram
+    await bot.download(message.voice.file_id, destination=tmp_path)
 
     try:
         with tmp_path.open("rb") as audio_file:
-            # Модель можно оставить whisper-1 или сменить на gpt-4o-mini-transcribe,
-            # если она у тебя доступна.
-            transcription = client.audio.transcriptions.create(
-                model="whisper-1",
+            result = client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
                 file=audio_file,
-                response_format="text",  # вернёт просто строку
-                # language="ru",  # можно указать язык явно, но не обязательно
+                response_format="text"   # вернёт обычный текст
             )
     finally:
-        # Чистим временный файл
         try:
             tmp_path.unlink(missing_ok=True)
-        except Exception:
+        except:
             pass
 
-    # Если response_format="text" — transcription уже строка
-    if isinstance(transcription, str):
-        return transcription
-
-    # На случай если ответ объект с полем text
-    return getattr(transcription, "text", "")
-
+    # result — строка
+    return result
 
 # ----------------- Хендлеры ----------------- #
 
