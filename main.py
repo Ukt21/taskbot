@@ -238,7 +238,10 @@ class AddTaskState(StatesGroup):
 
 class EditTaskState(StatesGroup):
     waiting_new_title = State()
+from aiogram.fsm.state import StatesGroup, State
 
+class ReportStates(StatesGroup):
+    waiting_for_report_text = State()
 
 # ---------------- /start ----------------
 
