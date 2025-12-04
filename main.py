@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.storage.memory import MemoryStorage  # ВАЖНО
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -20,8 +21,10 @@ from prompts import TASK_ASSISTANT_SYSTEM_PROMPT
 
 settings = get_settings()
 bot = Bot(token=settings.bot_token)
-dp = Dispatcher()
 
+# Один общий storage и один общий dispatcher
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
 # ----------------- FSM-состояния ----------------- #
 
@@ -310,18 +313,7 @@ async def _process_report(message: Message, period: str, text: str):
 
 # ----------------- Точка входа ----------------- #
 
-# ----------------- Точка входа ----------------- #
-
 async def main():
-    from aiogram.fsm.storage.memory import MemoryStorage
-
-    storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
-
-    # Регистрируем хендлеры после создания Dispatcher
-    dp.include_router(dp)   # если нужно объединять — убери
-    # но в нашем случае dp уже содержит handlers → эту строку НЕ вставляй
-
     await dp.start_polling(bot)
 
 
