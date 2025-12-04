@@ -136,24 +136,22 @@ async def call_task_model(
 import tempfile
 from pathlib import Path
 
-
 async def transcribe_voice(message: Message) -> str:
-    """
-    Расшифровка голосового через модель gpt-4o-mini-transcribe.
-    """
+    import tempfile
+    from pathlib import Path
 
-    # временный путь для файла
-    tmp_path = Path(tempfile.gettempdir()) / f"voice_{message.chat.id}_{message.message_id}.oga"
+    tmp_path = Path(tempfile.gettempdir()) / f"voice_{message.message_id}.oga"
 
-    # скачиваем voice из Telegram
-    await bot.download(message.voice.file_id, destination=tmp_path)
+    # корректная загрузка файла
+    tg_file = await bot.get_file(message.voice.file_id)
+    await bot.download_file(tg_file.file_path, tmp_path)
 
     try:
-        with tmp_path.open("rb") as audio_file:
+        with tmp_path.open("rb") as audio:
             result = client.audio.transcriptions.create(
                 model="gpt-4o-mini-transcribe",
-                file=audio_file,
-                response_format="text"   # вернёт обычный текст
+                file=audio,
+                response_format="text"
             )
     finally:
         try:
