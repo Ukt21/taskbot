@@ -75,65 +75,40 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 # ----------------- Вызов OpenAI ----------------- #
-
 async def call_task_model(
     *,
     button: Literal["add", "report"],
     period: Literal["day", "week", "month", "auto"],
     text: str,
 ) -> Dict[str, Any]:
-    """
-    Вызывает OpenAI Chat Completion с нашим системным промтом.
-    Модель обязана вернуть один JSON-объект (мы его парсим).
-    """
-
     user_payload = {
         "button": button,
         "period": period,
         "text": text,
     }
 
-    messages = [
-        {
-            "role": "system",
-            "content": TASK_ASSISTANT_SYSTEM_PROMPT,
-        },
-        {
-            "role": "user",
-            "content": json.dumps(user_payload, ensure_ascii=False),
-        },
-    ]
-
-    url = "https://api.openai.com/v1/chat/completions"
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {settings.openai_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.openai_model,
-                "messages": messages,
-                # просим строго JSON-объект
-                "response_format": {"type": "json_object"},
-            },
+    try:
+        response = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": TASK_ASSISTANT_SYSTEM_PROMPT},
+                {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+            ],
+            response_format={"type": "json_object"},
         )
-        response.raise_for_status()
-        data = response.json()
+    except Exception:
+        logging.exception("Ошибка при обращении к чат-модели OpenAI")
+        raise
 
-    content = data["choices"][0]["message"]["content"]
-
-    # content — строка с JSON, парсим
+    content = response.choices[0].message.content
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
-        # На всякий случай: если модель нарушила договор,
-        # вернем "заглушку" с ошибкой.
-        raise RuntimeError(f"Model returned non-JSON content: {content}")
+        logging.exception("Модель вернула невалидный JSON")
+        raise
 
     return parsed
+
 
 
 # ----------------- Вспомогательная функция STT (заглушка) ----------------- #
