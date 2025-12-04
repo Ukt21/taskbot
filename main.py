@@ -30,7 +30,7 @@ bot = Bot(token=settings.bot_token)
 client = OpenAI(api_key=settings.openai_api_key)
 
 CHAT_MODEL = settings.openai_model          # gpt-4o-mini
-STT_MODEL = "gpt-4o-mini-transcribe"        # модель для расшифровки голоса
+STT_MODEL = "whisper-1"                     # модель для расшифровки голоса
 
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -121,30 +121,30 @@ from pathlib import Path
 async def transcribe_voice(message: Message) -> str:
     """
     Скачивает голосовое сообщение из Telegram и расшифровывает его
-    через модель gpt-4o-mini-transcribe.
+    через модель whisper-1 (поддерживает ogg/oga от Telegram).
     """
 
     tmp_path = Path(tempfile.gettempdir()) / f"voice_{message.chat.id}_{message.message_id}.oga"
 
     # 1. Скачиваем voice с сервера Telegram
     try:
-        # В aiogram 3 можно передавать сам объект message.voice
         await bot.download(message.voice, destination=tmp_path)
     except Exception as e:
         logging.exception("Ошибка при скачивании голосового из Telegram")
         raise RuntimeError(f"Ошибка скачивания файла из Telegram: {e}")
 
-    # 2. Отправляем файл в OpenAI
+    # 2. Отправляем файл в OpenAI (whisper-1)
     try:
         with tmp_path.open("rb") as audio_file:
             result = client.audio.transcriptions.create(
-                model=STT_MODEL,        # gpt-4o-mini-transcribe
+                model=STT_MODEL,          # whisper-1
                 file=audio_file,
-                response_format="text", # вернёт обычную строку
+                response_format="text",   # вернёт строку
+                # language="ru",          # можно явно указать язык, не обязательно
             )
     except Exception as e:
         logging.exception("Ошибка при расшифровке голоса (STT)")
-        raise RuntimeError(f"Ошибка STT (gpt-4o-mini-transcribe): {e}")
+        raise RuntimeError(f"Ошибка STT (whisper-1): {e}")
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
