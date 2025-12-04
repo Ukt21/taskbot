@@ -141,29 +141,33 @@ import tempfile
 from pathlib import Path
 
 async def transcribe_voice(message: Message) -> str:
-    import tempfile
-    from pathlib import Path
+    """
+    Скачивает голосовое сообщение из Telegram и расшифровывает его
+    через модель gpt-4o-mini-transcribe.
+    """
 
-    tmp_path = Path(tempfile.gettempdir()) / f"voice_{message.message_id}.oga"
+    tmp_path = Path(tempfile.gettempdir()) / f"voice_{message.chat.id}_{message.message_id}.oga"
 
-    # корректная загрузка файла
-    tg_file = await bot.get_file(message.voice.file_id)
-    await bot.download_file(tg_file.file_path, tmp_path)
+    # Скачиваем файл
+    await bot.download(message.voice, destination=tmp_path)
 
     try:
-        with tmp_path.open("rb") as audio:
+        with tmp_path.open("rb") as audio_file:
             result = client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe",
-                file=audio,
-                response_format="text"
+                model=STT_MODEL,
+                file=audio_file,
+                response_format="text",
             )
+    except Exception:
+        logging.exception("Ошибка при расшифровке голоса (STT)")
+        # пробрасываем дальше, чтобы хендлер показал сообщение пользователю
+        raise
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
-        except:
-            pass
+        except Exception:
+            logging.exception("Не удалось удалить временный файл голосового")
 
-    # result — строка
     return result
 
 # ----------------- Хендлеры ----------------- #
