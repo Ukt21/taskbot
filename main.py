@@ -18,16 +18,15 @@ from aiogram.types import (
 
 from config import get_settings
 from prompts import TASK_ASSISTANT_SYSTEM_PROMPT
-
+from openai import OpenAI
 
 settings = get_settings()
 bot = Bot(token=settings.bot_token)
+
 client = OpenAI(api_key=settings.openai_api_key)
 
-# Один общий storage и один общий dispatcher
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-
 # ----------------- FSM-состояния ----------------- #
 
 class AddTaskState(StatesGroup):
