@@ -1,6 +1,7 @@
 import asyncio
 import json
 from typing import Literal, Dict, Any
+from openai import OpenAI
 
 import httpx
 from aiogram import Bot, Dispatcher, F
