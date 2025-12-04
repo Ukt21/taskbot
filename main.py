@@ -23,16 +23,16 @@ from openai import AsyncOpenAI
 
 # ================== НАСТРОЙКИ ==================
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError("Не задан TELEGRAM_BOT_TOKEN в переменных окружения")
+if not BOT_TOKEN:
+    raise RuntimeError("Не задан BOT_TOKEN в переменных окружения")
 if not OPENAI_API_KEY:
     raise RuntimeError("Не задан OPENAI_API_KEY в переменных окружения")
 
 bot = Bot(
-    token=TELEGRAM_BOT_TOKEN,
+    token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher(storage=MemoryStorage())
