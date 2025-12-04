@@ -259,11 +259,11 @@ async def handle_report_voice(message: Message, state: FSMContext):
     await message.answer("Обрабатываю голосовое сообщение, подожди немного...")
 
     try:
-        transcript = await transcribe_voice_stub(message)
+        transcript = await transcribe_voice(message)
     except Exception as e:
         await message.answer(
-            "Не удалось расшифровать голос. "
-            "Пожалуйста, отправь текстом, какой отчёт нужен."
+            "Не удалось расшифровать голос.\n"
+            f"Текст ошибки: {e}"
         )
         return
 
