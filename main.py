@@ -144,6 +144,27 @@ def build_task_buttons(user_id: int, period: Optional[str], done: bool = False):
 
     return kb.as_markup()
 
+async def show_tasks(message, tasks):
+    if not tasks:
+        await message.answer("Пока нет активных задач.")
+        return
+
+    for task in tasks:
+        task_id = task["id"]
+        title = task["title"]
+
+        # СНАЧАЛА текст задачи
+        text = f"📝 {title}"
+
+        # Кнопки отдельно
+        keyboard = InlineKeyboardMarkup(row_width=3)
+        keyboard.add(
+            InlineKeyboardButton("✔", callback_data=f"done_{task_id}"),
+            InlineKeyboardButton("✏", callback_data=f"edit_{task_id}"),
+            InlineKeyboardButton("❌", callback_data=f"delete_{task_id}"),
+        )
+
+        await message.answer(text, reply_markup=keyboard)
 
 # ---------------- РАСШИФРОВКА ГОЛОСА (WHISPER) ----------------
 
